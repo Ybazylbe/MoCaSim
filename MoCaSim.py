@@ -18,7 +18,7 @@ class RNG:
         self.state = seed
         # Multiplikátor – ovlivňuje periodu a kvalitu sekvence
         self.a = 1664525
-        self.c = 1013904223                      # Inkrement – přidává se v každém kroku
+        self.c = 1013904223
         # Modulus – zajišťuje cyklickost (perioda až 2^32)
         self.m = 2**32
 
@@ -63,13 +63,13 @@ class Constant:
     """
 
     def __init__(self, value, rng, name=""):
-        self.value = value                       # Pevná hodnota, kterou vždy vrací sample()
+        self.value = value
         # Reference na RNG (nepoužívá se, ale zachovává rozhraní)
         self.rng = rng
         self.name = name
 
     def sample(self):
-        return self.value                        # Žádná náhoda – vždy přesně tato hodnota
+        return self.value
 
 
 class Event:
@@ -79,8 +79,8 @@ class Event:
     """
 
     def __init__(self, time, typ, **kwargs):
-        self.time = time                         # Simulační čas, kdy má událost nastat
-        # Řetězec identifikující typ ('arrival', 'departure', 'renege')
+        self.time = time
+        # Řetězec identifikující typ ('arrival', 'departure', 'renege', 'breakdown', 'repair', 'routing')
         self.typ = typ
         # Přidá všechny kwargs jako atributy (např. node, cust_id)
         self.__dict__.update(kwargs)
@@ -100,28 +100,28 @@ class Customer:
     """
 
     def __init__(self, id, priority, arrival_time):
-        self.id = id                             # Unikátní identifikátor zákazníka
+        self.id = id
         # Číslo priority (nižší = vyšší priorita)
         self.priority = priority
-        self.arrival_time = arrival_time         # Čas příchodu do aktuálního uzlu
+        self.arrival_time = arrival_time
         # Čas zahájení obsluhy (pro výpočet čekací doby)
         self.service_start = None
         # Čas odchodu ze systému (konečný)
         self.departure = None
-        self.renege_time = None                  # Čas případného odchodu bez obsluhy
+        self.renege_time = None
 
 
 class Server:
     """
     Jednotlivé obslužné místo (server) v uzlu.
-    V této verzi podporuje pouze stavy IDLE/BUSY (poruchy nejsou implementovány v handle, ale struktura je připravena).
+    Podporuje stavy IDLE/BUSY/DOWN pro modelování poruch.
     """
 
     def __init__(self, id):
-        self.id = id                             # Identifikátor serveru v rámci uzlu
-        # Aktuální stav: IDLE, BUSY nebo DOWN (DOWN se nepoužívá v aktuálním kódu)
+        self.id = id
+        # Aktuální stav: IDLE, BUSY nebo DOWN
         self.state = "IDLE"
-        self.customer = None                     # ID zákazníka, kterého právě obsluhuje
+        self.customer = None
 
 
 class Node:
@@ -141,7 +141,7 @@ class Node:
         self.last_queue_time = 0.0
         # Kumulativní čas zaneprázdnění každého serveru
         self.busy_time = [0.0] * num_servers
-        # Kumulativní čas poruchy (nepoužíváno v této verzi)
+        # Kumulativní čas poruchy
         self.down_time = [0.0] * num_servers
         self.last_server_time = [0.0] * num_servers
         # Počet dokončených obsluh
@@ -190,7 +190,6 @@ class Node:
             if s.state == "BUSY":
                 self.busy_time[i] += dt_s
             elif s.state == "DOWN":
-                # Pro budoucí rozšíření o poruchy
                 self.down_time[i] += dt_s
             self.last_server_time[i] = t
 
@@ -208,18 +207,18 @@ class SimulationInput:
 class Simulator:
     """
     Hlavní třída diskrétně-událostní simulace.
-    Řídí frontu událostí, zpracovává příchody, odchody a reneging.
+    Řídí frontu událostí, zpracovává příchody, odchody, reneging, poruchy a routing.
     """
 
     def __init__(self, inp):
         self.inp = inp
-        self.rng = RNG(inp.seed)                 # Vlastní RNG s daným seedem
-        self.time = 0.0                          # Aktuální simulační čas
-        self.events = []                         # Heap pro události
-        self.nodes = {}                          # Slovník všech uzlů
+        self.rng = RNG(inp.seed)
+        self.time = 0.0
+        self.events = []
+        self.nodes = {}
         # Slovník všech zákazníků (pro přístup podle ID)
         self.customers = {}
-        self.next_id = 0                         # Čítač pro unikátní ID zákazníků
+        self.next_id = 0
         # Celkový počet zákazníků, kteří opustili systém po warmup
         self.departures = 0
         # Mapování cust_id → renege událost (pro zrušení při zahájení obsluhy)
@@ -247,6 +246,14 @@ class Simulator:
                            cust_id=self.next_id, prio=prio)
                 self.schedule(ev)
                 self.next_id += 1
+
+    def schedule_breakdown(self, node_name, server_id):
+        """Naplánuje další poruchu serveru."""
+        if node_name in self.inp.breakdown_dists and self.inp.breakdown_dists[node_name]:
+            t = self.time + self.inp.breakdown_dists[node_name].sample()
+            if t < self.inp.sim_time:
+                ev = Event(t, "breakdown", node=node_name, server_id=server_id)
+                self.schedule(ev)
 
     def start_service(self, node_name, cust, server):
         """
@@ -294,7 +301,7 @@ class Simulator:
     def handle_departure(self, ev):
         """
         Zpracování odchodu zákazníka z uzlu (dokončení obsluhy).
-        Uvolní server, případně zahájí obsluhu dalšího zákazníka, zpracuje směrování.
+        Uvolní server, případně zahájí obsluhu dalšího zákazníka, plánuje routing event.
         """
         node = self.nodes[ev.node]
         server = node.servers[ev.server_id]
@@ -314,29 +321,43 @@ class Simulator:
         if next_c:
             self.start_service(ev.node, next_c, server)
 
-        # Probabilistické směrování do dalšího uzlu
+        # Probabilistické směrování - vytvoří routing event
         if ev.node in self.inp.routing_matrix:
-            probs = self.inp.routing_matrix[ev.node]
-            u = self.rng.random()
-            cum = 0.0
-            next_node = None
-            for n, p in probs.items():
-                cum += p
-                if u <= cum:
-                    next_node = n
-                    break
-            if next_node:
-                # Zákazník okamžitě "přichází" do dalšího uzlu (čas zůstává stejný)
-                prio = self.inp.priorities.get(next_node, [0])[0]
-                arr_ev = Event(self.time, "arrival", node=next_node,
-                               cust_id=ev.cust_id, prio=prio)
-                self.schedule(arr_ev)
-                return  # Neodchází ze systému
+            routing_ev = Event(self.time, "routing",
+                               node=ev.node, cust_id=ev.cust_id)
+            self.schedule(routing_ev)
+        else:
+            # Zákazník opouští systém
+            cust.departure = self.time
+            if self.time >= self.inp.warmup:
+                self.departures += 1
 
-        # Zákazník opouští systém
-        cust.departure = self.time
-        if self.time >= self.inp.warmup:
-            self.departures += 1
+    def handle_routing(self, ev):
+        """
+        Zpracování routing události - rozhoduje kam zákazník pokračuje.
+        """
+        probs = self.inp.routing_matrix[ev.node]
+        u = self.rng.random()
+        cum = 0.0
+        next_node = None
+        for n, p in probs.items():
+            cum += p
+            if u <= cum:
+                next_node = n
+                break
+
+        if next_node:
+            # Zákazník pokračuje do dalšího uzlu
+            prio = self.inp.priorities.get(next_node, [0])[0]
+            arr_ev = Event(self.time, "arrival", node=next_node,
+                           cust_id=ev.cust_id, prio=prio)
+            self.schedule(arr_ev)
+        else:
+            # Zákazník opouští systém
+            cust = self.customers[ev.cust_id]
+            cust.departure = self.time
+            if self.time >= self.inp.warmup:
+                self.departures += 1
 
     def handle_renege(self, ev):
         """
@@ -359,11 +380,64 @@ class Simulator:
             node.reneges += 1
         del self.renege_events[ev.cust_id]
 
+    def handle_breakdown(self, ev):
+        """
+        Zpracování poruchy serveru.
+        Server přejde do stavu DOWN, pokud obsluhoval zákazníka, ten se vrací do fronty.
+        """
+        node = self.nodes[ev.node]
+        server = node.servers[ev.server_id]
+
+        node.update_stats(self.time)
+
+        # Pokud server obsluhoval zákazníka, vrátí ho do fronty
+        if server.state == "BUSY" and server.customer is not None:
+            cust = self.customers[server.customer]
+            node.add(cust)
+            server.customer = None
+
+        server.state = "DOWN"
+        node.update_stats(self.time)
+
+        # Naplánuje opravu
+        if self.inp.repair_dists[ev.node]:
+            t_repair = self.time + self.inp.repair_dists[ev.node].sample()
+            if t_repair < self.inp.sim_time:
+                repair_ev = Event(t_repair, "repair",
+                                  node=ev.node, server_id=ev.server_id)
+                self.schedule(repair_ev)
+
+    def handle_repair(self, ev):
+        """
+        Zpracování opravy serveru.
+        Server se vrací do stavu IDLE a může začít obsluhovat zákazníka z fronty.
+        """
+        node = self.nodes[ev.node]
+        server = node.servers[ev.server_id]
+
+        node.update_stats(self.time)
+        server.state = "IDLE"
+        node.update_stats(self.time)
+
+        # Pokud je ve frontě zákazník, zahájí obsluhu
+        next_c = node.next_customer()
+        if next_c:
+            self.start_service(ev.node, next_c, server)
+
+        # Naplánuje další poruchu
+        self.schedule_breakdown(ev.node, ev.server_id)
+
     def run(self):
         """Hlavní smyčka simulace – zpracovává události dokud nejsou vyčerpány nebo nepřekročí sim_time."""
         # Naplánuje první příchody do všech uzlů s externími příchody
         for n in self.inp.nodes:
             self.schedule_arrival(n)
+
+        # Naplánuje první poruchy pro všechny servery
+        for n in self.inp.nodes:
+            if n in self.inp.breakdown_dists and self.inp.breakdown_dists[n]:
+                for server_id in range(len(self.nodes[n].servers)):
+                    self.schedule_breakdown(n, server_id)
 
         while self.events:
             ev = heappop(self.events)
@@ -377,6 +451,12 @@ class Simulator:
                 self.handle_departure(ev)
             elif ev.typ == "renege":
                 self.handle_renege(ev)
+            elif ev.typ == "breakdown":
+                self.handle_breakdown(ev)
+            elif ev.typ == "repair":
+                self.handle_repair(ev)
+            elif ev.typ == "routing":
+                self.handle_routing(ev)
 
         # Finální aktualizace statistik na konci simulace
         for node in self.nodes.values():
@@ -387,17 +467,19 @@ class Simulator:
         Shromáždí a vrátí všechny klíčové statistiky simulace.
         Používá anonymní třídu pro jednoduchý objekt s atributy.
         """
-        eff = self.inp.sim_time - \
-            self.inp.warmup  # Efektivní čas měření (bez warmup)
+        eff = self.inp.sim_time - self.inp.warmup
         res = {"throughput": self.departures / eff if eff > 0 else 0.0}
 
         for n, node in self.nodes.items():
-            # Průměrná délka fronty (přes celou simulaci, včetně warmup – běžná praxe)
+            # Průměrná délka fronty
             res.setdefault("mean_queue_length", {})[
                 n] = node.queue_integral / self.inp.sim_time
             # Využití serverů (busy time / celkový dostupný čas)
+            total_time = sum(node.busy_time) + sum(node.down_time)
+            available_time = len(node.servers) * \
+                self.inp.sim_time - sum(node.down_time)
             res.setdefault("server_utilization", {})[n] = sum(
-                node.busy_time) / (len(node.servers) * self.inp.sim_time)
+                node.busy_time) / available_time if available_time > 0 else 0.0
             res.setdefault("service_completions", {})[n] = node.completions
             # Pravděpodobnost renege
             total_served_or_reneged = node.completions + node.reneges
@@ -407,7 +489,6 @@ class Simulator:
             res.setdefault("waiting_time_mean", {})[n] = sum(
                 node.waiting_times) / len(node.waiting_times) if node.waiting_times else 0.0
 
-        # Placeholder – reálný CI se počítá při batch simulacích
         res["throughput_ci"] = (0.0, 0.0)
         return type('Result', (), res)()
 
@@ -425,9 +506,8 @@ def simulate(inp):
     # Více batchů – každý s jiným seedem pro nezávislost
     thru = []
     for b in range(inp.batch_count):
-        # Hluboká kopie (dostatečná pro immutable hodnoty)
         new_inp = SimulationInput(**inp.__dict__)
-        new_inp.seed = inp.seed + b * 1000         # Odlišný seed pro každý batch
+        new_inp.seed = inp.seed + b * 1000
         new_inp.batch_count = 1
         s = Simulator(new_inp)
         s.run()
@@ -437,13 +517,11 @@ def simulate(inp):
     if len(thru) > 1:
         var = sum((x - mean)**2 for x in thru) / (len(thru) - 1)
         err = math.sqrt(var / len(thru))
-        # Přibližný 95% CI (t-distribuce pro malé vzorky by byla přesnější)
         margin = 2 * err
         ci = (mean - margin, mean + margin)
     else:
         ci = (mean, mean)
 
-    # Vrátí výsledky posledního běhu, ale s agregovanou propustností a CI
     res = s.get_results()
     res.throughput = mean
     res.throughput_ci = ci

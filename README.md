@@ -1,14 +1,15 @@
 # MoCaSim - Simulátor sítí front
 
-Framework pro diskrétně-událostní simulaci určený k modelování a analýze sítí front s podporou více serverů, priorit, netrpělivosti zákazníků (renege) a pravděpodobnostního směrování.
+Framework pro diskrétně-událostní simulaci určený k modelování a analýze sítí front s podporou více serverů, priorit, netrpělivosti zákazníků (renege), pravděpodobnostního směrování a poruch serverů.
 
 ## Vlastnosti
 
 - **Různé typy front**: Podpora M/M/c, M/D/c a obecných systémů hromadné obsluhy
 - **Prioritní fronty**: Zpracování více prioritních tříd v rámci každého uzlu
 - **Netrpělivost zákazníků**: Modelování renege chování s nastavitelnými rozděleními trpělivosti
-- **Síťové směrování**: Pravděpodobnostní směrování mezi uzly pro vícestupňové systémy
-- **Spolehlivost serverů**: Framework pro modelování poruch a oprav serverů
+- **Síťové směrování**: Pravděpodobnostní směrování mezi uzly jako samostatné události
+- **Spolehlivost serverů**: Plná podpora poruch (breakdown) a oprav (repair) serverů
+- **Jednotný generátor**: Všechna rozdělení sdílí jeden RNG pro reprodukovatelnost
 - **Dávková simulace**: Spuštění více replikací s intervaly spolehlivosti
 - **Statistická analýza**: Výpočet propustnosti, využití, délek front a čekacích dob
 
@@ -17,7 +18,7 @@ Framework pro diskrétně-událostní simulaci určený k modelování a analýz
 ```python
 from MoCaSim import *
 
-# Inicializace generátoru náhodných čísel
+# Inicializace jednotného generátoru náhodných čísel
 rng = RNG(seed=42)
 
 # Konfigurace simulace
@@ -28,9 +29,9 @@ sim_input = SimulationInput(
     servers={"Server": 3},                             # 3 paralelní servery
     priorities={"Server": [0]},                        # Jedna prioritní třída
     patience_dists={"Server": None},                   # Bez renege
-    breakdown_dists={"Server": None},
-    repair_dists={"Server": None},
-    routing_matrix={},
+    breakdown_dists={"Server": None},                  # Bez poruch
+    repair_dists={"Server": None},                     # Bez oprav
+    routing_matrix={},                                 # Bez routingu
     sim_time=1000.0,
     warmup=100.0,
     batch_count=5,
@@ -57,16 +58,20 @@ print(f"Průměrná čekací doba: {result.waiting_time_mean['Server']:.3f}")
 
 ### Generování náhodných čísel
 - Vlastní RNG založený na LCG pro reprodukovatelné výsledky
+- **Jednotný generátor** - všechna rozdělení sdílí jeden RNG objekt
 - Podpora exponenciálního a konstantního rozdělení
 
 ### Události
-- Události příchodu (zákazník vstupuje do uzlu)
-- Události odchodu (dokončení obsluhy)
-- Události renege (netrpělivý zákazník odchází)
+- **arrival** - zákazník vstupuje do uzlu
+- **departure** - dokončení obsluhy
+- **renege** - netrpělivý zákazník odchází
+- **breakdown** - server se porouchá
+- **repair** - server je opraven
+- **routing** - rozhodování o směrování zákazníka
 
 ### Sledované statistiky
 - Propustnost (obsloužení zákazníci za časovou jednotku)
-- Využití serveru (% času zaneprázdněn)
+- Využití serveru (% času zaneprázdněn, respektuje DOWN čas)
 - Průměrná délka fronty (časově vážená)
 - Průměrná čekací doba (doba ve frontě)
 - Pravděpodobnost renege
@@ -76,6 +81,8 @@ print(f"Průměrná čekací doba: {result.waiting_time_mean['Server']:.3f}")
 
 ### Fronta M/M/1
 ```python
+rng = RNG(seed=12345)
+
 sim_input = SimulationInput(
     nodes=["A"],
     arrival_dists={"A": Exponential(3.0, rng)},
@@ -95,6 +102,8 @@ sim_input = SimulationInput(
 
 ### Tandemová fronta se směrováním
 ```python
+rng = RNG(seed=789)
+
 sim_input = SimulationInput(
     nodes=["A", "B"],
     arrival_dists={"A": Exponential(2.0, rng)},
@@ -104,7 +113,7 @@ sim_input = SimulationInput(
     patience_dists={"A": None, "B": None},
     breakdown_dists={"A": None, "B": None},
     repair_dists={"A": None, "B": None},
-    routing_matrix={"A": {"B": 0.5}},  # 50% směrováno z A do B
+    routing_matrix={"A": {"B": 0.5}},  # 50% směrováno z A do B (routing event)
     sim_time=100.0,
     warmup=10.0,
     batch_count=5,
@@ -114,6 +123,8 @@ sim_input = SimulationInput(
 
 ### Netrpěliví zákazníci
 ```python
+rng = RNG(seed=54321)
+
 sim_input = SimulationInput(
     nodes=["A"],
     arrival_dists={"A": Exponential(5.0, rng)},
@@ -130,6 +141,60 @@ sim_input = SimulationInput(
     seed=54321
 )
 ```
+
+### Poruchy a opravy serverů
+```python
+rng = RNG(seed=99999)
+
+sim_input = SimulationInput(
+    nodes=["A"],
+    arrival_dists={"A": Exponential(2.0, rng)},
+    service_dists={"A": Exponential(4.0, rng)},
+    servers={"A": 3},
+    priorities={"A": [0]},
+    patience_dists={"A": None},
+    breakdown_dists={"A": Exponential(0.1, rng)},  # Průměrná doba do poruchy: 10 jednotek
+    repair_dists={"A": Exponential(0.5, rng)},     # Průměrná doba opravy: 2 jednotky
+    routing_matrix={},
+    sim_time=1000.0,
+    warmup=100.0,
+    batch_count=5,
+    seed=99999
+)
+```
+
+## Důležité poznámky
+
+### Jednotný generátor (RNG)
+Všechna rozdělení **musí** sdílet stejný RNG objekt pro zajištění:
+- Reprodukovatelnosti výsledků
+- Konzistentní sekvence náhodných čísel
+- Správné fungování batch simulací
+
+```python
+# SPRÁVNĚ - jeden RNG pro všechna rozdělení
+rng = RNG(seed=42)
+arrival = Exponential(2.0, rng)
+service = Exponential(3.0, rng)
+patience = Exponential(0.5, rng)
+
+# ŠPATNĚ - různé RNG objekty
+arrival = Exponential(2.0, RNG(seed=42))
+service = Exponential(3.0, RNG(seed=42))  # Nebude fungovat správně!
+```
+
+### Routing jako event
+Směrování zákazníků mezi uzly je implementováno jako samostatná událost (`routing`), která:
+- Odděluje logiku dokončení obsluhy od rozhodování o směrování
+- Umožňuje přesnější simulaci časování
+- Poskytuje lepší modularitu kódu
+
+### Poruchy serverů
+Při poruše serveru (breakdown):
+- Server přejde do stavu DOWN
+- Pokud obsluhoval zákazníka, ten se vrací do fronty
+- Po opravě (repair) se server vrací do stavu IDLE
+- Statistiky využití respektují DOWN čas
 
 ## Spuštění demonstrací
 
@@ -153,13 +218,31 @@ python test_mocasim.py
 Testy pokrývají:
 - Základní zpracování příchodů a obsluh
 - Chování renege
-- Mechanismus poruch serverů
-- Pravděpodobnostní směrování
+- Mechanismus poruch a oprav serverů
+- Pravděpodobnostní směrování (včetně routing eventu)
+- Jednotný RNG napříč rozděleními
+- Deterministické chování při stejném seedu
 
 ## Požadavky
 
 - Python 3.6+
 - matplotlib (pouze pro demonstrační vizualizace)
+
+## Architektura
+
+### Event Loop
+Simulace je řízena prioritní frontou událostí (heapq), která zpracovává:
+1. `arrival` - příchod zákazníka do uzlu
+2. `departure` - dokončení obsluhy zákazníka
+3. `routing` - rozhodnutí kam zákazník pokračuje
+4. `renege` - odchod netrpělivého zákazníka
+5. `breakdown` - porucha serveru
+6. `repair` - oprava serveru
+
+### Statistiky
+- **Časové integrály**: Přesné výpočty průměrných hodnot metodou "area under curve"
+- **Warmup perioda**: Ignorování začátečního tranzientního chování
+- **Batch replikace**: Odhad intervalů spolehlivosti pomocí nezávislých běhů
 
 ## Licence
 
