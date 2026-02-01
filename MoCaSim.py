@@ -60,15 +60,20 @@ class Constant:
     """
     Deterministické (konstantní) rozdělení – vždy vrací stejnou hodnotu.
     Užitečné pro testování, ladění nebo modelování deterministických systémů (např. D/M/1 fronta).
+    Každé volání sample() konzumuje jeden výběr z RNG, aby se udržela konzistence
+    společné sekvence při sdílení jednoho generátoru s ostatními rozděleními.
     """
 
     def __init__(self, value, rng, name=""):
         self.value = value
-        # Reference na RNG (nepoužívá se, ale zachovává rozhraní)
+        # Reference na RNG – konzumován při každém sample() pro sync sekvence
         self.rng = rng
         self.name = name
 
     def sample(self):
+        # FIX 1: konzumujeme jeden výběr z RNG, aby sdílený generátor
+        # postupoval stejně bez ohledu na typ rozdělení v proudu
+        self.rng.random()
         return self.value
 
 
@@ -77,6 +82,20 @@ class Event:
     Základní jednotka diskrétně-událostní simulace.
     Každá událost má čas provedení, typ a libovolné další parametry (předané jako kwargs).
     """
+
+    # FIX 4: explicitní prioritní řád pro vyřazování při stejném čase.
+    # Nižší číslo = vyšší priorita zpracování.
+    # Správný řád: nejprve departure (uvolní server), pak routing (směrování),
+    # pak renege (kontrola zrušení), pak repair (server back online),
+    # nakonec arrival (nový zákazník) a breakdown (porucha).
+    _TYPE_PRIORITY = {
+        "departure": 0,
+        "routing":   1,
+        "renege":    2,
+        "repair":    3,
+        "arrival":   4,
+        "breakdown": 5,
+    }
 
     def __init__(self, time, typ, **kwargs):
         self.time = time
@@ -88,9 +107,11 @@ class Event:
     def __lt__(self, other):
         """
         Porovnání pro heapq – zajišťuje správné řazení událostí.
-        Primárně podle času, sekundárně podle typu (aby při stejném čase měly přednost určité typy).
+        Primárně podle času, sekundárně podle explicitní prioritní mapy typů,
+        aby při stejném čase byly zpracovány v správном pořadí.
         """
-        return (self.time, self.typ) < (other.time, other.typ)
+        return (self.time, self._TYPE_PRIORITY.get(self.typ, 99)) < \
+               (other.time, other._TYPE_PRIORITY.get(other.typ, 99))
 
 
 class Customer:
@@ -136,20 +157,24 @@ class Node:
         self.servers = [Server(i) for i in range(num_servers)]
         # Slovník front podle priority
         self.queues = {p: deque() for p in priorities}
-        # Integrál délky fronty přes čas (pro průměr)
+        # Integrál délky fronty přes čas – akumuluje se POUZE po warmup
         self.queue_integral = 0.0
         self.last_queue_time = 0.0
-        # Kumulativní čas zaneprázdnění každého serveru
+        # Kumulativní čas zaneprázdnění každého serveru – POUZE po warmup
         self.busy_time = [0.0] * num_servers
-        # Kumulativní čas poruchy
+        # Kumulativní čas poruchy – POUZE po warmup
         self.down_time = [0.0] * num_servers
         self.last_server_time = [0.0] * num_servers
-        # Počet dokončených obsluh
+        # Celkový počet dokončených obsluh (od začátku, pro ladění)
         self.completions = 0
-        # Počet zákazníků, kteří odešli bez obsluhy
+        # Počet dokončených obsluh po warmup (pro konzistentní metriky)
+        self.completions_post_warmup = 0
+        # Počet zákazníků, kteří odešli bez obsluhy (po warmup)
         self.reneges = 0
         # Seznam čekacích dob (pouze po warmup)
         self.waiting_times = []
+        # Vlaj: zda warmup proběhl (nastaveno Simulatorom)
+        self._warmup_done = False
 
     def queue_length(self):
         """Vrátí aktuální celkovou délku všech prioritních front."""
@@ -161,7 +186,7 @@ class Node:
 
     def next_customer(self):
         """
-        Vrátí zákazníka s nejvyšší prioritou (nejnižší číslo priority).
+        Vrátí zákazníka s nejvyšší prioritou (nejnížší číslo priority).
         Prochází priority od nejnižšího čísla (nejvyšší priorita).
         """
         for p in sorted(self.queues):
@@ -176,28 +201,70 @@ class Node:
                 return s
         return None
 
+    def reset_stats_at_warmup(self, t):
+        """
+        FIX 3a: Resetu statistických integrály v okamžiku warmup.
+        Po tomto bodě se queue_integral, busy_time a down_time akumulují
+        pouze přes efektivní (post-warmup) periodu simulace.
+        """
+        # Nejprve aktualizujeme integrály do bodu warmup (aby last_*_time bylo správné)
+        # ale pak vyresetujeme akumulátory na nulu
+        self.queue_integral = 0.0
+        self.last_queue_time = t
+
+        for i in range(len(self.servers)):
+            self.busy_time[i] = 0.0
+            self.down_time[i] = 0.0
+            self.last_server_time[i] = t
+
+        self._warmup_done = True
+
     def update_stats(self, t):
         """
         Aktualizuje časové integrály při každé změně stavu (před každou událostí).
         Používá metodu oblastí (area under curve) pro přesný výpočet průměrů.
+        Akumulace probíhá pouze po warmup (zajištěno reset_stats_at_warmup).
         """
         dt = t - self.last_queue_time
-        self.queue_integral += self.queue_length() * dt
+        if self._warmup_done:
+            self.queue_integral += self.queue_length() * dt
         self.last_queue_time = t
 
         for i, s in enumerate(self.servers):
             dt_s = t - self.last_server_time[i]
-            if s.state == "BUSY":
-                self.busy_time[i] += dt_s
-            elif s.state == "DOWN":
-                self.down_time[i] += dt_s
+            if self._warmup_done:
+                if s.state == "BUSY":
+                    self.busy_time[i] += dt_s
+                elif s.state == "DOWN":
+                    self.down_time[i] += dt_s
             self.last_server_time[i] = t
+
+
+class Result:
+    """
+    FIX 2: Explicitní classe pro výsledky simulace místo anonymního type().
+    Všechny atributy jsou definované v __init__ s výchozími hodnotami,
+    což zajišťuje přehlednost a umožňuje introspekci.
+    """
+
+    def __init__(self):
+        self.throughput = 0.0
+        self.throughput_ci = (0.0, 0.0)
+        self.mean_queue_length = {}
+        self.server_utilization = {}
+        self.service_completions = {}
+        self.reneging_prob = {}
+        self.waiting_time_mean = {}
+
+    def __repr__(self):
+        return (f"Result(throughput={self.throughput:.4f}, "
+                f"ci={self.throughput_ci})")
 
 
 class SimulationInput:
     """
     Kontejner pro všechny vstupní parametry simulace.
-    Používá dynamické přidávání atributů přes __dict__.update pro jednoduchost.
+    Používá dynamické přidávání atributů přes __dict__.update pro jednoducnost.
     """
 
     def __init__(self, **kwargs):
@@ -224,6 +291,14 @@ class Simulator:
         # Mapování cust_id → renege událost (pro zrušení při zahájení obsluhy)
         self.renege_events = {}
 
+        # FIX 5: množina aktivních departure eventů – klíč (node, server_id).
+        # Při breakdown se příslušná entry vymazá; departure event se pak
+        # při zpracování pozná jako stale a přeskočí se.
+        self.active_departures = {}  # (node, server_id) → cust_id
+
+        # Vlaj pro jednorázový reset statistik v okamžiku warmup
+        self._warmup_reset_done = False
+
         # Vytvoření všech uzlů podle vstupu
         for n in inp.nodes:
             prio = inp.priorities.get(n, [0])
@@ -232,6 +307,17 @@ class Simulator:
     def schedule(self, ev):
         """Přidá událost do prioritní fronty."""
         heappush(self.events, ev)
+
+    def _check_warmup_reset(self):
+        """
+        Jednorázový reset statistik v okamžiku warmup.
+        Voláno na začátku každého cyklu hlavní smyčky.
+        """
+        if not self._warmup_reset_done and self.time >= self.inp.warmup:
+            for node in self.nodes.values():
+                node.update_stats(self.time)   # zavřeme integrály do warmup
+                node.reset_stats_at_warmup(self.time)
+            self._warmup_reset_done = True
 
     def schedule_arrival(self, node):
         """
@@ -268,6 +354,10 @@ class Simulator:
         # Zruší případnou plánovanou renege událost
         if cust.id in self.renege_events:
             del self.renege_events[cust.id]
+
+        # FIX 5: registrujeme aktivní departure pro tento server
+        self.active_departures[(node_name, server.id)] = cust.id
+
         t_end = self.time + self.inp.service_dists[node_name].sample()
         self.schedule(Event(t_end, "departure", node=node_name,
                       cust_id=cust.id, server_id=server.id))
@@ -303,6 +393,13 @@ class Simulator:
         Zpracování odchodu zákazníka z uzlu (dokončení obsluhy).
         Uvolní server, případně zahájí obsluhu dalšího zákazníka, plánuje routing event.
         """
+        # FIX 4 + 5: validace – ověříme, že departure je stále aktivní.
+        # Může být stale, pokud server mezitím dostal breakdown (ten vymazal
+        # entry z active_departures). V tom případě event jednoduše přeskočíme.
+        key = (ev.node, ev.server_id)
+        if key not in self.active_departures or self.active_departures[key] != ev.cust_id:
+            return  # stale departure – ignorujeme
+
         node = self.nodes[ev.node]
         server = node.servers[ev.server_id]
         cust = self.customers[ev.cust_id]
@@ -310,7 +407,11 @@ class Simulator:
         node.update_stats(self.time)
         node.completions += 1
         if self.time >= self.inp.warmup:
+            node.completions_post_warmup += 1
             node.waiting_times.append(cust.service_start - cust.arrival_time)
+
+        # Vymazáme aktivní departure záznam
+        del self.active_departures[key]
 
         server.state = "IDLE"
         server.customer = None
@@ -384,6 +485,7 @@ class Simulator:
         """
         Zpracování poruchy serveru.
         Server přejde do stavu DOWN, pokud obsluhoval zákazníka, ten se vrací do fronty.
+        Stale departure event pro tento server je invalidován přes active_departures.
         """
         node = self.nodes[ev.node]
         server = node.servers[ev.server_id]
@@ -393,7 +495,17 @@ class Simulator:
         # Pokud server obsluhoval zákazníka, vrátí ho do fronty
         if server.state == "BUSY" and server.customer is not None:
             cust = self.customers[server.customer]
+            # Resetujeme service_start – zákazník bude obsluhován znovu od nového začátku
+            cust.service_start = None
             node.add(cust)
+
+            # FIX 5: invalidujeme aktivní departure pro tento server.
+            # Příslušný departure event zůstane v heap, ale při zpracování
+            # bude pozán jako stale a přeskočen (viz handle_departure).
+            key = (ev.node, ev.server_id)
+            if key in self.active_departures:
+                del self.active_departures[key]
+
             server.customer = None
 
         server.state = "DOWN"
@@ -445,6 +557,9 @@ class Simulator:
                 break
             self.time = ev.time
 
+            # FIX 3a: jednorázový reset statistik při dosažení warmup
+            self._check_warmup_reset()
+
             if ev.typ == "arrival":
                 self.handle_arrival(ev)
             elif ev.typ == "departure":
@@ -465,32 +580,43 @@ class Simulator:
     def get_results(self):
         """
         Shromáždí a vrátí všechny klíčové statistiky simulace.
-        Používá anonymní třídu pro jednoduchý objekt s atributy.
+        FIX 2: vrátí explicitní Result objekt.
+        FIX 3: metriky konzistentně používají post-warmup hodnoty.
         """
         eff = self.inp.sim_time - self.inp.warmup
-        res = {"throughput": self.departures / eff if eff > 0 else 0.0}
+
+        # FIX 2: explicitní Result instance
+        res = Result()
+        res.throughput = self.departures / eff if eff > 0 else 0.0
 
         for n, node in self.nodes.items():
-            # Průměrná délka fronty
-            res.setdefault("mean_queue_length", {})[
-                n] = node.queue_integral / self.inp.sim_time
-            # Využití serverů (busy time / celkový dostupný čas)
-            total_time = sum(node.busy_time) + sum(node.down_time)
-            available_time = len(node.servers) * \
-                self.inp.sim_time - sum(node.down_time)
-            res.setdefault("server_utilization", {})[n] = sum(
-                node.busy_time) / available_time if available_time > 0 else 0.0
-            res.setdefault("service_completions", {})[n] = node.completions
-            # Pravděpodobnost renege
-            total_served_or_reneged = node.completions + node.reneges
-            res.setdefault("reneging_prob", {})[
-                n] = node.reneges / total_served_or_reneged if total_served_or_reneged > 0 else 0.0
-            # Průměrná čekací doba (pouze po warmup)
-            res.setdefault("waiting_time_mean", {})[n] = sum(
-                node.waiting_times) / len(node.waiting_times) if node.waiting_times else 0.0
+            # Průměrná délka fronty – integrál / efektivní doba (post-warmup)
+            res.mean_queue_length[n] = node.queue_integral / \
+                eff if eff > 0 else 0.0
 
-        res["throughput_ci"] = (0.0, 0.0)
-        return type('Result', (), res)()
+            # Využití serverů – busy_time / dostupný čas (oboje post-warmup)
+            available_time = len(node.servers) * eff - sum(node.down_time)
+            res.server_utilization[n] = (
+                sum(node.busy_time) /
+                available_time if available_time > 0 else 0.0
+            )
+
+            # Celkový počet obsluh (od začátku – pro ladění / informaci)
+            res.service_completions[n] = node.completions
+
+            # FIX 3b: pravděpodobnost renege – konzistentně post-warmup countery
+            total_post_warmup = node.completions_post_warmup + node.reneges
+            res.reneging_prob[n] = (
+                node.reneges / total_post_warmup if total_post_warmup > 0 else 0.0
+            )
+
+            # Průměrná čekací doba (pouze po warmup) – lafná jako předtím
+            res.waiting_time_mean[n] = (
+                sum(node.waiting_times) / len(node.waiting_times)
+                if node.waiting_times else 0.0
+            )
+
+        return res
 
 
 def simulate(inp):
@@ -505,13 +631,15 @@ def simulate(inp):
 
     # Více batchů – každý s jiným seedem pro nezávislost
     thru = []
+    last_res = None
     for b in range(inp.batch_count):
         new_inp = SimulationInput(**inp.__dict__)
         new_inp.seed = inp.seed + b * 1000
         new_inp.batch_count = 1
         s = Simulator(new_inp)
         s.run()
-        thru.append(s.get_results().throughput)
+        last_res = s.get_results()
+        thru.append(last_res.throughput)
 
     mean = sum(thru) / len(thru)
     if len(thru) > 1:
@@ -522,7 +650,7 @@ def simulate(inp):
     else:
         ci = (mean, mean)
 
-    res = s.get_results()
-    res.throughput = mean
-    res.throughput_ci = ci
-    return res
+    # Vracáme výsledky poslední batch, přepíšeme throughput a CI
+    last_res.throughput = mean
+    last_res.throughput_ci = ci
+    return last_res
