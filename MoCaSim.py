@@ -45,13 +45,14 @@ class Exponential:
         # Nepovinný název pro ladění (nepoužívá se v kódu)
         self.name = name
 
-    def sample(self):
+    def random(self):
         """
         Vygeneruje jednu realizaci exponenciálního rozdělení.
         Pokud rate <= 0, vrací nekonečno (ochrana proti chybám).
         """
         if self.rate > 0:
-            return -math.log(1 - self.rng.random()) / self.rate
+            u = self.rng.random()
+            return -math.log(1 - u) / self.rate
         # Nekonečná doba – simulace se prakticky zastaví pro tento proces
         return float('inf')
 
@@ -60,18 +61,18 @@ class Constant:
     """
     Deterministické (konstantní) rozdělení – vždy vrací stejnou hodnotu.
     Užitečné pro testování, ladění nebo modelování deterministických systémů (např. D/M/1 fronta).
-    Každé volání sample() konzumuje jeden výběr z RNG, aby se udržela konzistence
+    Každé volání random() konzumuje jeden výběr z RNG, aby se udržela konzistence
     společné sekvence při sdílení jednoho generátoru s ostatními rozděleními.
     """
 
     def __init__(self, value, rng, name=""):
         self.value = value
-        # Reference na RNG – konzumován při každém sample() pro sync sekvence
+        # Reference na RNG – konzumován při každém random() pro sync sekvence
         self.rng = rng
         self.name = name
 
-    def sample(self):
-        # FIX 1: konzumujeme jeden výběr z RNG, aby sdílený generátor
+    def random(self):
+        # Konzumujeme jeden výběr z RNG, aby sdílený generátor
         # postupoval stejně bez ohledu na typ rozdělení v proudu
         self.rng.random()
         return self.value
@@ -83,7 +84,7 @@ class Event:
     Každá událost má čas provedení, typ a libovolné další parametry (předané jako kwargs).
     """
 
-    # FIX 4: explicitní prioritní řád pro vyřazování při stejném čase.
+    # Explicitní prioritní řád pro vyřazování při stejném čase.
     # Nižší číslo = vyšší priorita zpracování.
     # Správný řád: nejprve departure (uvolní server), pak routing (směrování),
     # pak renege (kontrola zrušení), pak repair (server back online),
@@ -108,7 +109,7 @@ class Event:
         """
         Porovnání pro heapq – zajišťuje správné řazení událostí.
         Primárně podle času, sekundárně podle explicitní prioritní mapy typů,
-        aby při stejném čase byly zpracovány v správном pořadí.
+        aby při stejném čase byly zpracovány v správném pořadí.
         """
         return (self.time, self._TYPE_PRIORITY.get(self.typ, 99)) < \
                (other.time, other._TYPE_PRIORITY.get(other.typ, 99))
@@ -173,6 +174,8 @@ class Node:
         self.reneges = 0
         # Seznam čekacích dob (pouze po warmup)
         self.waiting_times = []
+        # Seznam dob v systému (pouze po warmup)
+        self.system_times = []
         # Vlaj: zda warmup proběhl (nastaveno Simulatorom)
         self._warmup_done = False
 
@@ -203,7 +206,7 @@ class Node:
 
     def reset_stats_at_warmup(self, t):
         """
-        FIX 3a: Resetu statistických integrály v okamžiku warmup.
+        Reset statistických integrálů v okamžiku warmup.
         Po tomto bodě se queue_integral, busy_time a down_time akumulují
         pouze přes efektivní (post-warmup) periodu simulace.
         """
@@ -240,31 +243,39 @@ class Node:
             self.last_server_time[i] = t
 
 
-class Result:
+class SimulationResults:
     """
-    FIX 2: Explicitní classe pro výsledky simulace místo anonymního type().
-    Všechny atributy jsou definované v __init__ s výchozími hodnotami,
-    což zajišťuje přehlednost a umožňuje introspekci.
+    Objekt výsledků simulace se všemi klíčovými metrikami.
+    Všechny atributy jsou definované v __init__ s výchozími hodnotami.
     """
 
     def __init__(self):
+        # Celková propustnost systému (zákazníci/čas)
         self.throughput = 0.0
+        # Interval spolehlivosti propustnosti (dolní, horní)
         self.throughput_ci = (0.0, 0.0)
+        # Průměrná délka fronty pro každý uzel {node_name: float}
         self.mean_queue_length = {}
+        # Využití serverů pro každý uzel {node_name: float}
         self.server_utilization = {}
+        # Počet dokončených obsluh pro každý uzel {node_name: int}
         self.service_completions = {}
-        self.reneging_prob = {}
-        self.waiting_time_mean = {}
+        # Pravděpodobnost renege pro každý uzel {node_name: float}
+        self.reneging_probability = {}
+        # Průměrná čekací doba pro každý uzel {node_name: float}
+        self.mean_waiting_time = {}
+        # Průměrná doba v systému pro každý uzel {node_name: float}
+        self.mean_system_time = {}
 
     def __repr__(self):
-        return (f"Result(throughput={self.throughput:.4f}, "
+        return (f"SimulationResults(throughput={self.throughput:.4f}, "
                 f"ci={self.throughput_ci})")
 
 
 class SimulationInput:
     """
     Kontejner pro všechny vstupní parametry simulace.
-    Používá dynamické přidávání atributů přes __dict__.update pro jednoducnost.
+    Používá dynamické přidávání atributů přes __dict__.update pro jednoduchost.
     """
 
     def __init__(self, **kwargs):
@@ -291,7 +302,7 @@ class Simulator:
         # Mapování cust_id → renege událost (pro zrušení při zahájení obsluhy)
         self.renege_events = {}
 
-        # FIX 5: množina aktivních departure eventů – klíč (node, server_id).
+        # Množina aktivních departure eventů – klíč (node, server_id).
         # Při breakdown se příslušná entry vymazá; departure event se pak
         # při zpracování pozná jako stale a přeskočí se.
         self.active_departures = {}  # (node, server_id) → cust_id
@@ -325,7 +336,7 @@ class Simulator:
         Pokud by další příchod byl po konci simulace, neplánuje se.
         """
         if node in self.inp.arrival_dists:
-            t = self.time + self.inp.arrival_dists[node].sample()
+            t = self.time + self.inp.arrival_dists[node].random()
             if t < self.inp.sim_time:
                 prio = self.inp.priorities.get(node, [0])[0]
                 ev = Event(t, "arrival", node=node,
@@ -336,7 +347,7 @@ class Simulator:
     def schedule_breakdown(self, node_name, server_id):
         """Naplánuje další poruchu serveru."""
         if node_name in self.inp.breakdown_dists and self.inp.breakdown_dists[node_name]:
-            t = self.time + self.inp.breakdown_dists[node_name].sample()
+            t = self.time + self.inp.breakdown_dists[node_name].random()
             if t < self.inp.sim_time:
                 ev = Event(t, "breakdown", node=node_name, server_id=server_id)
                 self.schedule(ev)
@@ -355,10 +366,10 @@ class Simulator:
         if cust.id in self.renege_events:
             del self.renege_events[cust.id]
 
-        # FIX 5: registrujeme aktivní departure pro tento server
+        # Registrujeme aktivní departure pro tento server
         self.active_departures[(node_name, server.id)] = cust.id
 
-        t_end = self.time + self.inp.service_dists[node_name].sample()
+        t_end = self.time + self.inp.service_dists[node_name].random()
         self.schedule(Event(t_end, "departure", node=node_name,
                       cust_id=cust.id, server_id=server.id))
 
@@ -379,7 +390,7 @@ class Simulator:
             # Pokud je definována trpělivost, plánuje renege
             if ev.node in self.inp.patience_dists and self.inp.patience_dists[ev.node]:
                 t_renege = self.time + \
-                    self.inp.patience_dists[ev.node].sample()
+                    self.inp.patience_dists[ev.node].random()
                 r_ev = Event(t_renege, "renege",
                              node=ev.node, cust_id=ev.cust_id)
                 self.schedule(r_ev)
@@ -393,7 +404,7 @@ class Simulator:
         Zpracování odchodu zákazníka z uzlu (dokončení obsluhy).
         Uvolní server, případně zahájí obsluhu dalšího zákazníka, plánuje routing event.
         """
-        # FIX 4 + 5: validace – ověříme, že departure je stále aktivní.
+        # Validace – ověříme, že departure je stále aktivní.
         # Může být stale, pokud server mezitím dostal breakdown (ten vymazal
         # entry z active_departures). V tom případě event jednoduše přeskočíme.
         key = (ev.node, ev.server_id)
@@ -409,6 +420,7 @@ class Simulator:
         if self.time >= self.inp.warmup:
             node.completions_post_warmup += 1
             node.waiting_times.append(cust.service_start - cust.arrival_time)
+            node.system_times.append(self.time - cust.arrival_time)
 
         # Vymazáme aktivní departure záznam
         del self.active_departures[key]
@@ -499,7 +511,7 @@ class Simulator:
             cust.service_start = None
             node.add(cust)
 
-            # FIX 5: invalidujeme aktivní departure pro tento server.
+            # Invalidujeme aktivní departure pro tento server.
             # Příslušný departure event zůstane v heap, ale při zpracování
             # bude pozán jako stale a přeskočen (viz handle_departure).
             key = (ev.node, ev.server_id)
@@ -513,7 +525,7 @@ class Simulator:
 
         # Naplánuje opravu
         if self.inp.repair_dists[ev.node]:
-            t_repair = self.time + self.inp.repair_dists[ev.node].sample()
+            t_repair = self.time + self.inp.repair_dists[ev.node].random()
             if t_repair < self.inp.sim_time:
                 repair_ev = Event(t_repair, "repair",
                                   node=ev.node, server_id=ev.server_id)
@@ -557,7 +569,7 @@ class Simulator:
                 break
             self.time = ev.time
 
-            # FIX 3a: jednorázový reset statistik při dosažení warmup
+            # Jednorázový reset statistik při dosažení warmup
             self._check_warmup_reset()
 
             if ev.typ == "arrival":
@@ -580,13 +592,12 @@ class Simulator:
     def get_results(self):
         """
         Shromáždí a vrátí všechny klíčové statistiky simulace.
-        FIX 2: vrátí explicitní Result objekt.
-        FIX 3: metriky konzistentně používají post-warmup hodnoty.
+        Vrátí explicitní SimulationResults objekt.
+        Metriky konzistentně používají post-warmup hodnoty.
         """
         eff = self.inp.sim_time - self.inp.warmup
 
-        # FIX 2: explicitní Result instance
-        res = Result()
+        res = SimulationResults()
         res.throughput = self.departures / eff if eff > 0 else 0.0
 
         for n, node in self.nodes.items():
@@ -604,16 +615,22 @@ class Simulator:
             # Celkový počet obsluh (od začátku – pro ladění / informaci)
             res.service_completions[n] = node.completions
 
-            # FIX 3b: pravděpodobnost renege – konzistentně post-warmup countery
+            # Pravděpodobnost renege – konzistentně post-warmup countery
             total_post_warmup = node.completions_post_warmup + node.reneges
-            res.reneging_prob[n] = (
+            res.reneging_probability[n] = (
                 node.reneges / total_post_warmup if total_post_warmup > 0 else 0.0
             )
 
-            # Průměrná čekací doba (pouze po warmup) – lafná jako předtím
-            res.waiting_time_mean[n] = (
+            # Průměrná čekací doba (pouze po warmup)
+            res.mean_waiting_time[n] = (
                 sum(node.waiting_times) / len(node.waiting_times)
                 if node.waiting_times else 0.0
+            )
+
+            # Průměrná doba v systému (pouze po warmup)
+            res.mean_system_time[n] = (
+                sum(node.system_times) / len(node.system_times)
+                if node.system_times else 0.0
             )
 
         return res

@@ -50,7 +50,7 @@ def experiment_server_count():
             'throughput_high': result.throughput_ci[1],
             'utilization': result.server_utilization['A'],
             'mean_queue': result.mean_queue_length['A'],
-            'mean_wait': result.waiting_time_mean['A']
+            'mean_wait': result.mean_waiting_time['A']
         })
 
     print()
@@ -132,7 +132,7 @@ def experiment_reneging_impact():
 
         results.append({
             'label': label,
-            'reneging_prob': result.reneging_prob['A'],
+            'reneging_prob': result.reneging_probability['A'],
             'throughput': result.throughput,
             'mean_queue': result.mean_queue_length['A']
         })

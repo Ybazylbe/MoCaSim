@@ -64,8 +64,8 @@ def test_reneging():
     )
 
     result = simulate(sim_input)
-    assert result.reneging_prob['A'] > 0.3, \
-        f"Expected reneging_prob > 0.3, got {result.reneging_prob['A']}"
+    assert result.reneging_probability['A'] > 0.3, \
+        f"Expected reneging_probability > 0.3, got {result.reneging_probability['A']}"
     print("  → Test reneging: PASSED\n")
 
 
@@ -158,13 +158,13 @@ def test_single_rng():
     assert service.rng is rng
     assert patience.rng is rng
 
-    # Ověříme, že Constant konzumuje RNG draw (FIX 1)
+    # Ověříme, že Constant konzumuje RNG draw
     rng_test = RNG(seed=777)
     state_before = rng_test.state
     c = Constant(42.0, rng_test)
-    c.sample()
+    c.random()
     assert rng_test.state != state_before, \
-        "Constant.sample() must advance the RNG state"
+        "Constant.random() must advance the RNG state"
 
     # Spustíme simulaci a ověříme deterministické chování
     # První běh
@@ -263,10 +263,10 @@ def test_routing_event():
 
 def test_result_object_type():
     """
-    FIX 2: Ověřuje, že simulate() vrátí explicitní Result objekt
+    Ověřuje, že simulate() vrátí explicitní SimulationResults objekt
     se všemi očekávánými atributy.
     """
-    print("Spouštím test: Result objekt struktura")
+    print("Spouštím test: SimulationResults objekt struktura")
 
     rng = RNG(seed=42)
     sim_input = SimulationInput(
@@ -287,24 +287,25 @@ def test_result_object_type():
 
     result = simulate(sim_input)
 
-    assert isinstance(result, Result), \
-        f"Expected Result instance, got {type(result)}"
+    assert isinstance(result, SimulationResults), \
+        f"Expected SimulationResults instance, got {type(result)}"
     assert hasattr(result, 'throughput')
     assert hasattr(result, 'throughput_ci')
     assert hasattr(result, 'mean_queue_length')
     assert hasattr(result, 'server_utilization')
     assert hasattr(result, 'service_completions')
-    assert hasattr(result, 'reneging_prob')
-    assert hasattr(result, 'waiting_time_mean')
+    assert hasattr(result, 'reneging_probability')
+    assert hasattr(result, 'mean_waiting_time')
+    assert hasattr(result, 'mean_system_time')
     assert 'A' in result.mean_queue_length
     assert 'A' in result.server_utilization
 
-    print("  → Test Result objekt: PASSED\n")
+    print("  → Test SimulationResults objekt: PASSED\n")
 
 
 def test_warmup_metrics_consistency():
     """
-    FIX 3: Ověřuje, že metriky (queue_length, utilization, reneging_prob)
+    Ověřuje, že metriky (queue_length, utilization, reneging_probability)
     konzistentně používají post-warmup hodnoty.
     """
     print("Spouštím test: Konzistence metrik po warmup")
@@ -335,23 +336,26 @@ def test_warmup_metrics_consistency():
         f"mean_queue_length must be >= 0, got {result.mean_queue_length['A']}"
     assert 0.0 <= result.server_utilization['A'] <= 1.0, \
         f"server_utilization must be in [0,1], got {result.server_utilization['A']}"
-    assert 0.0 <= result.reneging_prob['A'] <= 1.0, \
-        f"reneging_prob must be in [0,1], got {result.reneging_prob['A']}"
-    assert result.waiting_time_mean['A'] >= 0, \
-        f"waiting_time_mean must be >= 0, got {result.waiting_time_mean['A']}"
+    assert 0.0 <= result.reneging_probability['A'] <= 1.0, \
+        f"reneging_probability must be in [0,1], got {result.reneging_probability['A']}"
+    assert result.mean_waiting_time['A'] >= 0, \
+        f"mean_waiting_time must be >= 0, got {result.mean_waiting_time['A']}"
+    assert result.mean_system_time['A'] >= 0, \
+        f"mean_system_time must be >= 0, got {result.mean_system_time['A']}"
 
     print(f"    queue_length={result.mean_queue_length['A']:.4f}, "
           f"util={result.server_utilization['A']:.4f}, "
-          f"renege_prob={result.reneging_prob['A']:.4f}, "
-          f"wait={result.waiting_time_mean['A']:.4f}")
+          f"renege_prob={result.reneging_probability['A']:.4f}, "
+          f"wait={result.mean_waiting_time['A']:.4f}, "
+          f"system={result.mean_system_time['A']:.4f}")
     print("  → Test konzistence metrik: PASSED\n")
 
 
 def test_breakdown_no_stale_departure():
     """
-    FIX 5: Ověřuje, že po poruce serveru stale departure event
+    Ověřuje, že po poruce serveru stale departure event
     neovlivní simulaci – zákazník se správně vrátí do fronty a
-    later dokončení odpovídá skutečné obsluže.
+    later dokončení odpovídá skutečné obsluze.
     """
     print("Spouštím test: Žádné stale departure po breakdown")
 
@@ -394,7 +398,7 @@ def test_breakdown_no_stale_departure():
 
 def test_simultaneous_events_order():
     """
-    FIX 4: Ověřuje, že při stejném čase jsou departure zpracovány
+    Ověřuje, že při stejném čase jsou departure zpracovány
     před breakdown, takže server state konzistence se udržuje.
     Косвенný test přes validní utilization i při overlapping events.
     """
@@ -406,7 +410,7 @@ def test_simultaneous_events_order():
     sim_input = SimulationInput(
         nodes=["A"],
         arrival_dists={"A": Constant(2.0, rng)},
-        # departure přesně na границе
+        # departure přesně na границě
         service_dists={"A": Constant(2.0, rng)},
         servers={"A": 2},
         priorities={"A": [0]},

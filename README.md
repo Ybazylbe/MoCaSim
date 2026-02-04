@@ -18,7 +18,7 @@
 
 - **Exponenciální rozdělení**: Pro mezičasy příchodů a doby obsluhy (M/M/c fronty)
 - **Konstantní rozdělení**: Pro deterministické testování (D/M/c fronty)
-- **Jednotný generátor**: Všechna rozdělení sdílejí společný RNG pomocí metody `sample()`, což zajišťuje konzistentní sekvenci náhodných čísel
+- **Jednotný generátor**: Všechna rozdělení sdílejí společný RNG pomocí metody `random()`, což zajišťuje konzistentní sekvenci náhodných čísel
 
 #### Prioritní fronty
 
@@ -46,14 +46,15 @@
 
 ### Statistické výstupy
 
-Simulátor vrací **strukturovaný objekt `Result`** se všemi klíčovými metrikami:
+Simulátor vrací **strukturovaný objekt `SimulationResults`** se všemi klíčovými metrikami:
 
-- **Propustnost systému** (throughput) s intervalem spolehlivosti při batch simulacích
-- **Průměrná délka fronty** pro každý uzel
-- **Využití serverů** (server utilization) – poměr času, kdy jsou servery aktivně zaneprázdněné
-- **Pravděpodobnost renege** – podíl zákazníků, kteří odešli bez obsluhy
-- **Průměrná čekací doba** zákazníků ve frontě
-- **Počet dokončených obsluh** pro každý uzel
+- **Propustnost systému** (`throughput`) s intervalem spolehlivosti při batch simulacích
+- **Průměrná délka fronty** (`mean_queue_length`) pro každý uzel
+- **Využití serverů** (`server_utilization`) – poměr času, kdy jsou servery aktivně zaneprázdněné
+- **Pravděpodobnost renege** (`reneging_probability`) – podíl zákazníků, kteří odešli bez obsluhy
+- **Průměrná čekací doba** (`mean_waiting_time`) zákazníků ve frontě
+- **Průměrná doba v systému** (`mean_system_time`) od příchodu do odchodu
+- **Počet dokončených obsluh** (`service_completions`) pro každý uzel
 
 Všechny metriky jsou **konzistentně počítány pouze z post-warmup periody** pro eliminaci tranzietnních efektů.
 
@@ -132,8 +133,48 @@ result = simulate(sim_input)
 # Výpis výsledků
 print(f"Propustnost: {result.throughput:.3f} ± {(result.throughput_ci[1] - result.throughput_ci[0])/2:.3f}")
 print(f"Využití serverů v A: {result.server_utilization['A']:.3f}")
-print(f"Pravděpodobnost renege v A: {result.reneging_prob['A']:.3f}")
+print(f"Pravděpodobnost renege v A: {result.reneging_probability['A']:.3f}")
 print(f"Průměrná délka fronty v B: {result.mean_queue_length['B']:.3f}")
+print(f"Průměrná čekací doba v A: {result.mean_waiting_time['A']:.3f}")
+print(f"Průměrná doba v systému v B: {result.mean_system_time['B']:.3f}")
+```
+
+## Rozhraní generátorů
+
+### Metoda `random()`
+
+Všechna pravděpodobnostní rozdělení implementují metodu `random()`, která vrací jednu náhodnou realizaci:
+
+```python
+# RNG - pseudonáhodný generátor
+rng = RNG(seed=42)
+u = rng.random()  # uniformní náhodné číslo [0, 1)
+
+# Exponenciální rozdělení
+exp_dist = Exponential(rate=2.0, rng=rng)
+interarrival_time = exp_dist.random()
+
+# Konstantní rozdělení
+const_dist = Constant(value=5.0, rng=rng)
+service_time = const_dist.random()
+```
+
+**Důležité**: I `Constant` rozdělení konzumuje jeden výběr z RNG při každém volání `random()`, aby se zachovala synchronizace společné sekvence napříč různými typy rozdělení.
+
+## Výsledkový objekt SimulationResults
+
+Funkce `simulate()` vrací instanci třídy `SimulationResults` s těmito atributy:
+
+```python
+class SimulationResults:
+    throughput: float                    # Celková propustnost systému
+    throughput_ci: tuple[float, float]   # Interval spolehlivosti (dolní, horní)
+    mean_queue_length: dict[str, float]  # {node_name: průměrná délka fronty}
+    server_utilization: dict[str, float] # {node_name: využití serverů}
+    service_completions: dict[str, int]  # {node_name: počet dokončených obsluh}
+    reneging_probability: dict[str, float]  # {node_name: pravděpodobnost renege}
+    mean_waiting_time: dict[str, float]  # {node_name: průměrná čekací doba}
+    mean_system_time: dict[str, float]   # {node_name: průměrná doba v systému}
 ```
 
 ## Technické detaily implementace
@@ -168,11 +209,11 @@ Při poruše serveru během obsluhy:
 
 - První část simulace (`warmup`) slouží k ustálení systému
 - Statistické integrály (`queue_integral`, `busy_time`, `down_time`) jsou **resetovány na nulu** v okamžiku konce warmup
-- Všechny metriky v `Result` objektu odrážejí pouze post-warmup chování
+- Všechny metriky v `SimulationResults` objektu odrážejí pouze post-warmup chování
 
 ### Společný generátor náhodných čísel
 
-- Všechna pravděpodobnostní rozdělení používají **metodu `sample()`** pro generování hodnot
+- Všechna pravděpodobnostní rozdělení používají **metodu `random()`** pro generování hodnot
 - Sdílený RNG objekt zajišťuje konzistentní sekvenci napříč všemi rozděleními
 - I deterministické `Constant` rozdělení konzumuje draw z RNG pro zachování synchronizace sekvence
 
@@ -184,9 +225,9 @@ Testovací sada (`test_mocasim.py`) obsahuje 10 izolovaných testů pokrývajíc
 - ✓ Funkci renege mechanismu
 - ✓ Poruchy a opravy serverů
 - ✓ Probabilistické směrování
-- ✓ Konzistenci společného RNG a metody `sample()`
+- ✓ Konzistenci společného RNG a metody `random()`
 - ✓ Routing jako samostatnou událost v event loopu
-- ✓ Strukturu objektu `Result`
+- ✓ Strukturu objektu `SimulationResults`
 - ✓ Konzistenci metrik po warmup periodě
 - ✓ Robustnost proti stale departure events
 - ✓ Správné pořadí simultánních událostí
@@ -216,12 +257,12 @@ Grafy jsou zobrazeny pomocí **matplotlib** a nabízejí interaktivní prohlíž
 ### Základní komponenty
 
 - **`RNG`**: Lineární kongruentní generátor pro pseudonáhodná čísla
-- **`Exponential`**, **`Constant`**: Pravděpodobnostní rozdělení s metodou `sample()`
+- **`Exponential`**, **`Constant`**: Pravděpodobnostní rozdělení s metodou `random()`
 - **`Event`**: Reprezentace události s časem, typem a parametry
 - **`Customer`**: Zákazník procházející systémem s časovými značkami
 - **`Server`**: Obslužné místo se stavy IDLE/BUSY/DOWN
 - **`Node`**: Uzel sítě obsahující servery, fronty a statistiky
-- **`Result`**: Strukturovaný objekt výsledků simulace
+- **`SimulationResults`**: Strukturovaný objekt výsledků simulace
 - **`SimulationInput`**: Kontejner vstupních parametrů
 - **`Simulator`**: Hlavní třída řídící event loop a simulaci
 
@@ -252,7 +293,7 @@ Grafy jsou zobrazeny pomocí **matplotlib** a nabízejí interaktivní prohlíž
 
 - Plně komentovaný kód v češtině
 - Jasná separace odpovědností mezi třídami
-- Strukturované výsledky přes dedikovaný `Result` objekt
+- Strukturované výsledky přes dedikovaný `SimulationResults` objekt
 
 ### Rozšiřitelnost
 
@@ -283,4 +324,4 @@ Projekt je vytvořen pro akademické a výukové účely. Kód je plně komentov
 
 ---
 
-**Poznámka**: Simulátor je navržen s důrazem na **korektnost, reprodukovatelnost a čitelnost kódu**. Všechny implementační detaily (sdílený RNG s metodou `sample()`, explicitní `Result` objekt, warmup reset, event ordering při stejném čase, stale event handling při poruchách, routing jako samostatná událost) jsou pečlivě ošetřeny a ověřeny komplexní testovací sadou.
+**Poznámka**: Simulátor je navržen s důrazem na **korektnost, reprodukovatelnost a čitelnost kódu**. Všechny implementační detaily (sdílený RNG s metodou `random()`, explicitní `SimulationResults` objekt, warmup reset, event ordering při stejném čase, stale event handling při poruchách, routing jako samostatná událost) jsou pečlivě ošetřeny a ověřeny komplexní testovací sadou.
